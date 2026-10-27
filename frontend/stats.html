@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flash Sale Monitor</title>
+<style>
+:root{--bg:#0f1115;--card:#181b22;--line:#2a2f3a;--text:#eef0f4;--muted:#9aa3b2;--ok:#2fbf71;--bad:#ef4444;--accent:#ff5a36}
+*{box-sizing:border-box;margin:0}
+body{font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);padding:24px 16px;max-width:980px;margin:auto}
+h1{font-size:22px}p.sub{color:var(--muted);margin-bottom:20px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:700px){.grid{grid-template-columns:1fr}}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px}
+.panel h2{font-size:15px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center}
+.pill{font-size:12px;padding:3px 10px;border-radius:99px;font-weight:700}
+.pill.ok{background:#2fbf7122;color:var(--ok)}.pill.bad{background:#ef444422;color:var(--bad)}
+.big{font-size:44px;font-weight:800;font-variant-numeric:tabular-nums;line-height:1.1}
+.big.ok{color:var(--ok)}.big.bad{color:var(--bad)}
+.kv{display:flex;justify-content:space-between;padding:6px 0;border-top:1px solid var(--line);font-variant-numeric:tabular-nums}
+.kv span{color:var(--muted)}
+.tools{margin-top:16px;display:flex;gap:8px;flex-wrap:wrap}
+input,button{font:inherit;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:#11141a;color:var(--text)}
+button{background:var(--accent);border:0;font-weight:700;cursor:pointer}
+#msg{color:var(--muted);margin-top:8px;font-size:13px}
+</style>
+</head>
+<body>
+<h1>Flash Sale Monitor</h1>
+<p class="sub">Live numbers, refreshed every second. Stock: <b id="total">500</b> phones.</p>
+
+<div class="grid">
+  <section class="panel">
+    <h2>Fixed design (Redis Lua + queue + worker) <span id="fixedPill" class="pill ok">OK</span></h2>
+    <div class="big ok" id="confirmed">0</div>
+    <p class="sub" style="margin:0 0 8px">confirmed orders in Postgres</p>
+    <div class="kv"><span>Reserved in Redis</span><b id="reserved">0</b></div>
+    <div class="kv"><span>Redis tokens left</span><b id="redisLeft">0</b></div>
+    <div class="kv"><span>DB stock left</span><b id="dbLeft">0</b></div>
+    <div class="kv"><span>Waiting in queue</span><b id="pending">0</b></div>
+  </section>
+
+  <section class="panel">
+    <h2>Naive design (SELECT then UPDATE) <span id="naivePill" class="pill ok">OK</span></h2>
+    <div class="big" id="naiveOrders">0</div>
+    <p class="sub" style="margin:0 0 8px">orders accepted</p>
+    <div class="kv"><span>Oversold by</span><b id="oversoldBy">0</b></div>
+    <div class="kv"><span>DB stock left</span><b id="naiveLeft">0</b></div>
+  </section>
+</div>
+
+<div class="tools">
+  <input id="token" placeholder="Admin token" value="demo-admin-token" aria-label="Admin token">
+  <input id="delay" type="number" min="0" value="10" style="width:90px" aria-label="Seconds until sale starts">
+  <button id="reset">Reset sale</button>
+</div>
+<p id="msg">Reset sets stock back to 500 and starts the sale after the given seconds.</p>
+
+<script>
+const $ = id => document.getElementById(id);
+async function load() {
+  try {
+    const s = await (await fetch('/api/stats', { cache: 'no-store' })).json();
+    $('total').textContent = s.totalStock;
+    $('confirmed').textContent = s.confirmedOrders;
+    $('reserved').textContent = s.reserved;
+    $('redisLeft').textContent = s.redisStockLeft;
+    $('dbLeft').textContent = s.dbStockLeft;
+    $('pending').textContent = s.queuePending ?? 0;
+    const over = s.oversold;
+    $('fixedPill').textContent = over ? 'OVERSOLD' : 'No overselling';
+    $('fixedPill').className = 'pill ' + (over ? 'bad' : 'ok');
+
+    const n = s.naive;
+    $('naiveOrders').textContent = n.orders;
+    $('naiveOrders').className = 'big ' + (n.oversold ? 'bad' : '');
+    $('oversoldBy').textContent = n.oversoldBy;
+    $('naiveLeft').textContent = n.dbStockLeft;
+    $('naivePill').textContent = n.oversold ? 'OVERSOLD' : 'OK';
+    $('naivePill').className = 'pill ' + (n.oversold ? 'bad' : 'ok');
+  } catch (_) {}
+}
+$('reset').onclick = async () => {
+  const r = await fetch('/api/admin/reset?delay=' + ($('delay').value || 0), {
+    method: 'POST', headers: { 'X-Admin-Token': $('token').value }
+  });
+  $('msg').textContent = r.ok ? 'Reset done. Sale starts soon.' : 'Reset failed (' + r.status + ')';
+  load();
+};
+load(); setInterval(load, 1000);
+</script>
+</body>
+</html>

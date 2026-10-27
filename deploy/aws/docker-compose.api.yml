@@ -1,0 +1,20 @@
+# Runs on EACH of the 2 "api" EC2 instances (behind the Application Load Balancer).
+# Start with:  docker compose -f deploy/aws/docker-compose.api.yml --env-file deploy/aws/.env up -d --build
+name: flashsale-api
+
+services:
+  api:
+    build: ../..
+    command: ["api"]
+    ports: ["8080:8080"]          # the ALB target group sends traffic here
+    environment:
+      REDIS_ADDR: ${DATA_HOST}:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      DATABASE_URL: postgres://flash:${DB_PASSWORD}@${DATA_HOST}:5432/flashsale?pool_max_conns=20
+      TOTAL_STOCK: "500"
+      SALE_DELAY_SEC: "60"
+      ADMIN_TOKEN: ${ADMIN_TOKEN}
+      LOADTEST_KEY: ${LOADTEST_KEY}
+      RATE_LIMIT_PER_SEC: "5"     # no NGINX on AWS, so the app rate-limits per IP (shared via Redis)
+      STATIC_DIR: /static         # the API also serves the shop page
+    restart: unless-stopped

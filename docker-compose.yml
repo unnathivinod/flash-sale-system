@@ -1,0 +1,85 @@
+# One command runs everything:  docker compose up --build
+# Open http://localhost:8080        (shop page)
+#      http://localhost:8080/stats.html (live dashboard)
+name: flashsale
+
+x-app: &app
+  build: .
+  image: flashsale-app
+  environment:
+    REDIS_ADDR: redis:6379
+    # pool_max_conns lets the NAIVE endpoint open many DB connections at once,
+    # which is exactly what exposes its race condition.
+    DATABASE_URL: postgres://flash:flash@postgres:5432/flashsale?pool_max_conns=40
+    TOTAL_STOCK: "500"
+    SALE_DELAY_SEC: "30"
+    ADMIN_TOKEN: demo-admin-token
+    LOADTEST_KEY: local-loadtest-only
+    RATE_LIMIT_PER_SEC: "0" # NGINX rate-limits locally
+  depends_on:
+    postgres: { condition: service_healthy }
+    redis: { condition: service_healthy }
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: flash
+      POSTGRES_PASSWORD: flash
+      POSTGRES_DB: flashsale
+    command: ["postgres", "-c", "max_connections=300"]
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flash -d flashsale"]
+      interval: 2s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      retries: 30
+
+  # 3 identical, stateless API servers
+  api:
+    <<: *app
+    command: ["api"]
+    deploy:
+      replicas: 3
+
+  # 2 workers that drain the queue into Postgres
+  worker:
+    <<: *app
+    build: !reset null      # reuse the image the api service builds (avoids a double build)
+    pull_policy: never
+    depends_on:
+      api: { condition: service_started }
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    command: ["worker"]
+    environment:
+      REDIS_ADDR: redis:6379
+      DATABASE_URL: postgres://flash:flash@postgres:5432/flashsale?pool_max_conns=10
+      WORKER_CONCURRENCY: "4"
+    deploy:
+      replicas: 2
+
+  # Load balancer + rate limiter + static file server (plays the role of AWS ALB + CDN locally)
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./frontend:/usr/share/nginx/html:ro
+    depends_on:
+      - api
+    restart: unless-stopped
+
+networks:
+  default:
+    name: flashsale-net

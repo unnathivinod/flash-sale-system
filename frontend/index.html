@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Festival Flash Sale</title>
+<meta name="description" content="500 phones. 8 PM. One per customer.">
+<!-- Everything (CSS + JS + image) is inline: one small request, no framework,
+     ~10 KB total. Interactive almost instantly, even on slow phones. -->
+<style>
+:root{--bg:#0f1115;--card:#181b22;--line:#2a2f3a;--text:#eef0f4;--muted:#9aa3b2;--accent:#ff5a36;--ok:#2fbf71;--warn:#f5b301;--bad:#ef4444}
+*{box-sizing:border-box;margin:0}
+body{font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:grid;place-items:center;padding:16px}
+.card{width:100%;max-width:420px;background:var(--card);border:1px solid var(--line);border-radius:20px;padding:24px}
+.tag{display:inline-block;font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);background:#ff5a3618;padding:4px 10px;border-radius:99px}
+h1{font-size:26px;margin:12px 0 4px}
+.sub{color:var(--muted);font-size:14px}
+.phone{display:block;margin:20px auto;width:120px;height:auto}
+.price{display:flex;align-items:baseline;gap:10px;margin-bottom:16px}
+.price b{font-size:28px}.price s{color:var(--muted)}
+.meter{height:8px;background:var(--line);border-radius:99px;overflow:hidden;margin:6px 0 4px}
+.meter i{display:block;height:100%;background:var(--accent);transition:width .4s}
+.row{display:flex;justify-content:space-between;font-size:13px;color:var(--muted)}
+.count{font-variant-numeric:tabular-nums;font-size:34px;font-weight:700;text-align:center;margin:18px 0 6px}
+button{width:100%;margin-top:14px;padding:16px;font:inherit;font-weight:700;font-size:17px;border:0;border-radius:14px;cursor:pointer;background:var(--accent);color:#fff;transition:opacity .2s,transform .05s}
+button:active{transform:scale(.98)}
+button:disabled{opacity:.45;cursor:not-allowed}
+.status{margin-top:14px;padding:12px 14px;border-radius:12px;font-size:14px;display:none}
+.status.show{display:block}
+.status.wait{background:#f5b30118;color:var(--warn)}
+.status.ok{background:#2fbf7118;color:var(--ok)}
+.status.bad{background:#ef444418;color:var(--bad)}
+.spin{display:inline-block;width:12px;height:12px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:s .7s linear infinite;vertical-align:-1px;margin-right:6px}
+@keyframes s{to{transform:rotate(360deg)}}
+.foot{margin-top:16px;font-size:12px;color:var(--muted);text-align:center}
+@media (prefers-reduced-motion:reduce){.spin{animation:none}}
+</style>
+</head>
+<body>
+<main class="card">
+  <span class="tag">Festival Flash Sale</span>
+  <h1>Flash Phone X</h1>
+  <p class="sub">500 units only · one per customer</p>
+
+  <svg class="phone" viewBox="0 0 120 220" aria-hidden="true">
+    <rect x="6" y="4" width="108" height="212" rx="20" fill="#232834" stroke="#3a4150" stroke-width="3"/>
+    <rect x="14" y="20" width="92" height="176" rx="10" fill="url(#g)"/>
+    <rect x="46" y="10" width="28" height="5" rx="2.5" fill="#3a4150"/>
+    <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ff5a36"/><stop offset="1" stop-color="#6a2cff"/></linearGradient></defs>
+  </svg>
+
+  <div class="price"><b>₹19,999</b><s>₹34,999</s></div>
+
+  <div class="row"><span id="stockText">Checking stock…</span><span id="pct"></span></div>
+  <div class="meter"><i id="bar" style="width:100%"></i></div>
+
+  <div class="count" id="count" aria-live="polite">--:--</div>
+  <p class="sub" id="countLabel" style="text-align:center">Sale starts in</p>
+
+  <button id="buy" disabled>Waiting for sale…</button>
+  <div class="status" id="status" role="status" aria-live="polite"></div>
+
+  <p class="foot">Signed in as <b id="who"></b></p>
+</main>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const btn = $('buy'), statusBox = $('status');
+
+  // Simulated login: a stable guest id per browser tab.
+  let user = sessionStorage.getItem('uid');
+  if (!user) { user = 'guest-' + Math.random().toString(36).slice(2, 10); sessionStorage.setItem('uid', user); }
+  $('who').textContent = user;
+
+  let sale = null;          // last /api/sale response
+  let clockOffset = 0;      // server time - our time (so the countdown is exact)
+  let locked = false;       // the click lock (prevents duplicate requests)
+  let done = false;         // order finished (success or sold out)
+  let pollTimer = null;
+
+  const show = (cls, html) => { statusBox.className = 'status show ' + cls; statusBox.innerHTML = html; };
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const jitter = ms => ms * (0.8 + Math.random() * 0.4); // spread retries so users don't all hit at once
+
+  // ---------- 1. Sale status: polling with jitter (cheap and works everywhere) ----------
+  async function refreshSale() {
+    try {
+      const r = await fetch('/api/sale', { cache: 'no-store' });
+      if (r.ok) {
+        sale = await r.json();
+        clockOffset = sale.serverTime - Date.now();
+        renderStock();
+      }
+    } catch (_) { /* network blip: keep last value, try again later */ }
+    // Poll faster near the start, slower later, stop when sold out.
+    if (sale && sale.status === 'SOLD_OUT') return;
+    const near = sale && Math.abs(sale.startsAt - (Date.now() + clockOffset)) < 10000;
+    pollTimer = setTimeout(refreshSale, jitter(near ? 1000 : 3000));
+  }
+
+  function renderStock() {
+    const left = Math.max(0, sale.stockLeft), total = sale.totalStock || 500;
+    $('stockText').textContent = left > 0 ? `${left} of ${total} left` : 'Sold out';
+    $('pct').textContent = Math.round(left / total * 100) + '%';
+    $('bar').style.width = (left / total * 100) + '%';
+    if (left <= 0 && !done && !locked) {
+      btn.disabled = true; btn.textContent = 'Sold out';
+      show('bad', 'All 500 phones are gone. Thanks for joining!');
+    }
+  }
+
+  // ---------- 2. Countdown (runs locally, synced to server clock) ----------
+  function tick() {
+    if (sale) {
+      const ms = sale.startsAt - (Date.now() + clockOffset);
+      if (ms > 0) {
+        const s = Math.ceil(ms / 1000);
+        $('count').textContent = String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+        btn.disabled = true; btn.textContent = 'Waiting for sale…';
+      } else {
+        $('count').textContent = 'LIVE'; $('countLabel').textContent = 'Sale is on';
+        if (!locked && !done && sale.stockLeft > 0) { btn.disabled = false; btn.textContent = 'Buy now'; }
+      }
+    }
+    requestAnimationFrame(() => setTimeout(tick, 250));
+  }
+
+  // ---------- 3. The Buy button: locked on the FIRST click ----------
+  btn.addEventListener('click', async () => {
+    if (locked || done) return;           // ignore every click after the first
+    locked = true;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spin"></span>Reserving…';
+    // Optimistic UI: tell the user right away instead of a frozen screen.
+    show('wait', '<span class="spin"></span>You\'re in! Holding your spot in the queue…');
+    await checkout(0);
+  });
+
+  async function checkout(attempt) {
+    let r;
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 8000);
+      r = await fetch('/api/checkout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: user }),
+        signal: ctrl.signal
+      });
+      clearTimeout(t);
+    } catch (_) {
+      // Safe to retry: the server returns the SAME order for the same user.
+      return retry(attempt, 'Network is busy');
+    }
+
+    if (r.status === 202) {
+      const data = await r.json();
+      show('wait', '<span class="spin"></span>Phone reserved! Confirming your order…');
+      return track(data.trackUrl);
+    }
+    if (r.status === 409) return finish('bad', 'Sorry, sold out. All 500 phones were claimed.', 'Sold out');
+    if (r.status === 425) { locked = false; return show('wait', 'Sale hasn\'t started yet. Hang tight!'); }
+    if (r.status === 429 || r.status >= 500) return retry(attempt, 'High traffic');
+    return finish('bad', 'Something went wrong. Please refresh.', 'Try again');
+  }
+
+  async function retry(attempt, why) {
+    if (attempt >= 4) return finish('bad', why + '. Please try again in a moment.', 'Try again', true);
+    const wait = jitter(Math.min(8000, 1000 * 2 ** attempt)); // exponential backoff: 1s, 2s, 4s, 8s
+    show('wait', `<span class="spin"></span>${why}, retrying in ${Math.ceil(wait / 1000)}s…`);
+    await sleep(wait);
+    return checkout(attempt + 1);
+  }
+
+  // ---------- 4. After 202 Accepted: poll the tracking URL with backoff ----------
+  async function track(url) {
+    let delay = 400;
+    for (let i = 0; i < 25; i++) {
+      await sleep(jitter(delay));
+      try {
+        const r = await fetch(url, { cache: 'no-store' });
+        if (r.ok) {
+          const { status, orderId } = await r.json();
+          if (status === 'CONFIRMED') return finish('ok', `🎉 Order confirmed! Order ID <b>${orderId}</b>`, 'Purchased');
+          if (status !== 'QUEUED') return finish('bad', 'Sorry, we couldn\'t complete this order.', 'Not completed');
+        }
+      } catch (_) {}
+      delay = Math.min(delay * 1.5, 4000);
+    }
+    finish('wait', 'Still confirming. We\'ll email you shortly.', 'Processing');
+  }
+
+  function finish(cls, msg, label, unlock) {
+    if (unlock) { locked = false; btn.disabled = false; }   // let them try again
+    else { done = true; btn.disabled = true; }              // final state
+    btn.textContent = label;
+    show(cls, msg);
+  }
+
+  refreshSale();
+  tick();
+})();
+</script>
+</body>
+</html>

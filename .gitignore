@@ -1,0 +1,4 @@
+deploy/aws/.env
+*.exe
+/api
+/worker
